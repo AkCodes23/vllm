@@ -1,21 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
-from typing import cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
-
-from vllm import PromptType, TextPrompt
-from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (
-    BaseMultiModalItemTracker,
-    ChatCompletionContentPartParam,
-    ChatCompletionContentPartTextParam,
-    ConversationMessage,
-    MultiModalItemTracker,
-    _parse_chat_message_content_parts,
-)
-from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 
 from .typing import (
     ScoreContentPartParam,
@@ -23,6 +11,12 @@ from .typing import (
     ScoreInput,
     ScoringData,
 )
+
+if TYPE_CHECKING:
+    from vllm import PromptType, TextPrompt
+    from vllm.config import ModelConfig
+    from vllm.entrypoints.chat_utils import BaseMultiModalItemTracker, ConversationMessage
+    from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 
 
 def get_num_special_tokens_for_pair(tokenizer) -> int:
@@ -49,11 +43,35 @@ def truncate_text_to_tokens(
     boundary, avoiding lossy encode→decode round-trips that can shift
     the token count by 1-3 tokens due to BPE merge boundary changes.
     """
-    encoding = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
-    if len(encoding["input_ids"]) <= max_tokens:
+    if max_tokens <= 0:
+        return ""
+
+    try:
+        encoding = tokenizer(
+            text, add_special_tokens=False, return_offsets_mapping=True
+        )
+    except Exception:
+        encoding = None
+
+    if encoding is not None:
+        input_ids = encoding.get("input_ids", [])
+        offset_mapping = encoding.get("offset_mapping")
+        if offset_mapping is not None and len(input_ids) > max_tokens:
+            char_end = offset_mapping[max_tokens - 1][1]
+            return text[:char_end]
         return text
-    char_end = encoding["offset_mapping"][max_tokens - 1][1]
-    return text[:char_end]
+
+    # Slow tokenizers / custom tokenizers may not support offsets. Fall back to
+    # encode -> decode; this can be slightly lossy for some BPEs, but avoids
+    # crashing the scoring path.
+    encoding = tokenizer(text, add_special_tokens=False)
+    input_ids = encoding.get("input_ids", [])
+    if len(input_ids) <= max_tokens:
+        return text
+    decode = getattr(tokenizer, "decode", None)
+    if decode is None:
+        return " ".join(text.split()[:max_tokens])
+    return decode(input_ids[:max_tokens])
 
 
 def compute_maxsim_score(q_emb: torch.Tensor, d_emb: torch.Tensor) -> torch.Tensor:
@@ -127,8 +145,8 @@ def validate_score_input(
 def score_data_to_prompts(
     data_list: list[ScoreData],
     role: str,
-    model_config: ModelConfig,
-) -> list[PromptType]:
+    model_config: "ModelConfig",
+) -> list["PromptType"]:
     """Convert a list of ScoreData into PromptType objects.
 
     For plain text inputs, returns the string directly.
@@ -139,6 +157,8 @@ def score_data_to_prompts(
     This is used by late-interaction scoring where each query/document
     is encoded independently.
     """
+    from vllm import PromptType, TextPrompt
+
     prompts: list[PromptType] = []
     for data in data_list:
         if isinstance(data, str):
