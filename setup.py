@@ -608,9 +608,17 @@ class precompiled_wheel_utils:
                 try_default = True  # try outside handler to keep the stacktrace simple
             if try_default:
                 print("Trying the default variant from remote")
-                wheels, repo_url = precompiled_wheel_utils.fetch_metadata_for_variant(
-                    commit, None
-                )
+                try:
+                    wheels, repo_url = (
+                        precompiled_wheel_utils.fetch_metadata_for_variant(commit, None)
+                    )
+                except Exception as e:
+                    raise RuntimeError(
+                        "Failed to fetch precompiled wheel metadata. "
+                        "If you are behind a firewall or do not have internet "
+                        "access, set VLLM_USE_PRECOMPILED=0 to build from source "
+                        "or set VLLM_PRECOMPILED_WHEEL_LOCATION to a wheel path/URL."
+                    ) from e
                 # if this also fails, then we have nothing more to try / cache
             assert wheels is not None and repo_url is not None, (
                 "Failed to fetch precompiled wheel metadata"
@@ -804,8 +812,6 @@ class precompiled_wheel_utils:
                 .strip()
             )
             return base_commit
-        except ValueError as err:
-            raise ValueError(err) from None
         except Exception as err:
             logger.warning(
                 "Failed to get the base commit in the main branch. "
